@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Shooter</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const fit = () => { cv.width = innerWidth; cv.height = innerHeight; };
+addEventListener('resize', fit); fit();
+
+const PR = 12, ER = 14, BR = 4, PSPEED = 220, ESPEED = 60, PBSPEED = 600, EBSPEED = 200, FIRE_RATE = 0.15;
+const keys = {}, mouse = { x: 0, y: 0, down: false };
+addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+cv.addEventListener('mousedown', () => { if (over) reset(); mouse.down = true; });
+addEventListener('mouseup', () => mouse.down = false);
+
+let player, walls, enemies, bullets, score, elapsed, spawnT, fireT, over;
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// circle vs rectangle: closest point on the rect is within r
+const hitsRect = (x, y, r, w) => Math.hypot(x - clamp(x, w.x, w.x + w.w), y - clamp(y, w.y, w.y + w.h)) < r;
+const hitsWall = (x, y, r) => walls.some(w => hitsRect(x, y, r, w));
+// shortcut: samples every 6px, so a wall thinner than that could be missed; fine since walls are >= 20px
+function los(ax, ay, bx, by, ws = walls) {
+  const n = Math.ceil(Math.hypot(bx - ax, by - ay) / 6);
+  for (let i = 1; i < n; i++) {
+    const x = ax + (bx - ax) * i / n, y = ay + (by - ay) * i / n;
+    if (ws.some(w => hitsRect(x, y, 0.01, w))) return false;
+  }
+  return true;
+}
+console.assert(hitsRect(5, 5, 1, { x: 0, y: 0, w: 10, h: 10 }) && !hitsRect(20, 5, 1, { x: 0, y: 0, w: 10, h: 10 }), 'hitsRect self-check');
+console.assert(!los(0, 5, 20, 5, [{ x: 8, y: 0, w: 4, h: 10 }]) && los(0, 20, 20, 20, [{ x: 8, y: 0, w: 4, h: 10 }]), 'los self-check');
+
+// axis-separated so things slide along walls instead of sticking
+function move(e, dx, dy, r) {
+  const nx = clamp(e.x + dx, r, cv.width - r);
+  if (!hitsWall(nx, e.y, r)) e.x = nx;
+  const ny = clamp(e.y + dy, r, cv.height - r);
+  if (!hitsWall(e.x, ny, r)) e.y = ny;
+}
+
+function reset() {
+  const W = cv.width, H = cv.height;
+  player = { x: W / 2, y: H / 2 };
+  walls = [];
+  for (let tries = 0; walls.length < 8 && tries < 200; tries++) {
+    let w = rand(80, 220), h = rand(20, 40);
+    if (Math.random() < 0.5) [w, h] = [h, w];
+    const wall = { x: rand(60, W - 60 - w), y: rand(60, H - 60 - h), w, h };
+    if (!hitsRect(W / 2, H / 2, 120, wall)) walls.push(wall); // keep spawn clear
+  }
+  enemies = []; bullets = [];
+  score = 0; elapsed = 0; spawnT = 1; fireT = 0; over = false;
+}
+
+function spawnEnemy() {
+  const W = cv.width, H = cv.height, side = Math.floor(Math.random() * 4);
+  const x = side === 0 ? ER : side === 1 ? W - ER : rand(ER, W - ER);
+  const y = side === 2 ? ER : side === 3 ? H - ER : rand(ER, H - ER);
+  enemies.push({ x, y, cooldown: rand(1.5, 3) });
+}
+
+function shoot(from, tx, ty, speed, fromPlayer) {
+  const a = Math.atan2(ty - from.y, tx - from.x);
+  bullets.push({ x: from.x, y: from.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, fromPlayer });
+}
+
+function update(dt) {
+  elapsed += dt;
+  let dx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0), dy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+  const len = Math.hypot(dx, dy) || 1;
+  move(player, dx / len * PSPEED * dt, dy / len * PSPEED * dt, PR);
+
+  fireT -= dt;
+  if (mouse.down && fireT <= 0) { shoot(player, mouse.x, mouse.y, PBSPEED, true); fireT = FIRE_RATE; }
+
+  spawnT -= dt;
+  if (spawnT <= 0) { spawnEnemy(); spawnT = Math.max(0.5, 2.5 - elapsed / 30); }
+
+  // shortcut: enemies chase in a straight line and can get stuck on walls; add pathfinding if that feels bad
+  for (const e of enemies) {
+    const d = Math.hypot(player.x - e.x, player.y - e.y) || 1;
+    move(e, (player.x - e.x) / d * ESPEED * dt, (player.y - e.y) / d * ESPEED * dt, ER);
+    if (d < PR + ER) over = true;
+    e.cooldown -= dt;
+    if (e.cooldown <= 0 && los(e.x, e.y, player.x, player.y)) {
+      shoot(e, player.x, player.y, EBSPEED, false);
+      e.cooldown = rand(1.5, 3);
+    }
+  }
+
+  for (const b of bullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.x < 0 || b.y < 0 || b.x > cv.width || b.y > cv.height || hitsWall(b.x, b.y, BR)) { b.dead = true; continue; }
+    if (b.fromPlayer) {
+      const i = enemies.findIndex(e => Math.hypot(e.x - b.x, e.y - b.y) < ER + BR);
+      if (i >= 0) { enemies.splice(i, 1); b.dead = true; score += 100; }
+    } else if (Math.hypot(player.x - b.x, player.y - b.y) < PR + BR) over = true;
+  }
+  bullets = bullets.filter(b => !b.dead);
+}
+
+const glow = c => { ctx.strokeStyle = ctx.fillStyle = ctx.shadowColor = c; ctx.shadowBlur = 15; };
+const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+
+function draw() {
+  const W = cv.width, H = cv.height;
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(0,255,255,0.08)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x < W; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = 0; y < H; y += 40) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  ctx.lineWidth = 2;
+  for (const w of walls) {
+    glow('#2979ff'); ctx.strokeRect(w.x, w.y, w.w, w.h);
+    ctx.fillStyle = 'rgba(41,121,255,0.15)'; ctx.fillRect(w.x, w.y, w.w, w.h);
+  }
+
+  glow('#ff00ff');
+  for (const e of enemies) {
+    ctx.beginPath();
+    ctx.moveTo(e.x, e.y - ER); ctx.lineTo(e.x + ER, e.y); ctx.lineTo(e.x, e.y + ER); ctx.lineTo(e.x - ER, e.y);
+    ctx.closePath(); ctx.stroke();
+  }
+
+  glow('#00ffff');
+  ctx.beginPath(); ctx.arc(player.x, player.y, PR, 0, Math.PI * 2); ctx.stroke();
+  const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  ctx.beginPath(); ctx.moveTo(player.x, player.y);
+  ctx.lineTo(player.x + Math.cos(a) * (PR + 10), player.y + Math.sin(a) * (PR + 10)); ctx.stroke();
+
+  for (const b of bullets) {
+    glow(b.fromPlayer ? '#ffff00' : '#ff3030');
+    ctx.beginPath(); ctx.arc(b.x, b.y, BR, 0, Math.PI * 2); ctx.fill();
+  }
+
+  glow('#00ffff');
+  ctx.font = '22px monospace'; ctx.textBaseline = 'top';
+  ctx.textAlign = 'left'; ctx.fillText(`SCORE ${score}`, 16, 12);
+  ctx.textAlign = 'right'; ctx.fillText(`TIME ${fmt(elapsed)}`, W - 16, 12);
+
+  if (over) {
+    ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    glow('#ff00ff'); ctx.font = '56px monospace'; ctx.fillText('GAME OVER', W / 2, H / 2 - 50);
+    glow('#00ffff'); ctx.font = '24px monospace';
+    ctx.fillText(`SCORE ${score}   TIME ${fmt(elapsed)}`, W / 2, H / 2 + 10);
+    ctx.fillText('click to restart', W / 2, H / 2 + 50);
+  }
+}
+
+let last = performance.now();
+function loop(t) {
+  const dt = Math.min((t - last) / 1000, 0.05); // cap so a background tab doesn't teleport everything
+  last = t;
+  if (!over) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

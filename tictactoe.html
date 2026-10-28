@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tic Tac Toe</title>
+<style>
+  body { font-family: system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; margin: 0; background: #f4f4f4; }
+  #board { display: grid; grid-template-columns: repeat(3, 90px); gap: 6px; }
+  #board button { width: 90px; height: 90px; font-size: 48px; cursor: pointer; }
+  p, #reset { text-align: center; font-size: 20px; margin: 16px auto; display: block; }
+</style>
+</head>
+<body>
+<main>
+  <p id="status" aria-live="polite">X's turn</p>
+  <div id="board"></div>
+  <button id="reset">New game</button>
+</main>
+<script>
+const LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const winner = b => LINES.map(([a,c,d]) => b[a] && b[a] === b[c] && b[a] === b[d] ? b[a] : null).find(Boolean);
+console.assert(winner(['X','X','X','','','','','','']) === 'X' && !winner(Array(9).fill('')), 'winner() self-check');
+
+const board = document.getElementById('board'), status = document.getElementById('status');
+let cells, turn, over;
+
+function reset() {
+  cells = Array(9).fill(''); turn = 'X'; over = false;
+  board.innerHTML = '';
+  cells.forEach((_, i) => {
+    const btn = document.createElement('button');
+    btn.setAttribute('aria-label', `Square ${i + 1}`);
+    btn.onclick = () => play(i, btn);
+    board.append(btn);
+  });
+  status.textContent = "X's turn";
+}
+
+function play(i, btn) {
+  if (over || cells[i]) return;
+  cells[i] = btn.textContent = turn;
+  const w = winner(cells);
+  if (w) { over = true; status.textContent = `${w} wins!`; }
+  else if (cells.every(Boolean)) { over = true; status.textContent = "It's a draw!"; }
+  else { turn = turn === 'X' ? 'O' : 'X'; status.textContent = `${turn}'s turn`; }
+}
+
+document.getElementById('reset').onclick = reset;
+reset();
+</script>
+</body>
+</html>
