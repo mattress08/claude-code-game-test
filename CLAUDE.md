@@ -20,13 +20,17 @@ The only tests are `console.assert` self-checks at the top of each script; they 
 
 ## shooter.html architecture
 
-- All game state is module-level globals, (re)initialised by `reset()` (also generates the random walls, keeping the player spawn clear).
-- `loop()` runs on `requestAnimationFrame`, caps `dt` at 0.05 s, calls `update(dt)` (skipped when `over`) then `draw()`.
-- Collision is circle-vs-rect via `hitsRect` / `hitsWall`; `move()` resolves X and Y separately so the player and enemies slide along walls.
+- `state` is `'title' | 'play' | 'paused' | 'over'`. The title screen exists so the first click can start audio; ESC toggles pause (and the music).
+- All game state is module-level globals, (re)initialised by `reset()` (also generates the random walls, keeping the player spawn clear); `start()` = `reset()` + intro sound + music.
+- `loop()` runs on `requestAnimationFrame`, caps `dt` at 0.05 s, calls `update(dt)` only in `play`, `updateFx(dt)` (particles, shake, flash, banners) in `play` and `over`, then `draw()` always.
+- Collision is circle-vs-rect via `hitsRect` / `hitsWall`; `move()` resolves X and Y separately so things slide along walls, and returns which axes were blocked (the player uses it to zero momentum).
+- Player has momentum: input adds `ACCEL`, `FRICTION` decays velocity, top speed is `ACCEL / FRICTION`. Hits apply knockback through the same velocity.
 - Enemies only shoot when `los()` (sampled line of sight) reaches the player, which is what makes walls work as cover.
-- Tuning constants (`PR`, `ER`, `BR`, `PSPEED`, `ESPEED`, `PBSPEED`, `EBSPEED`, `FIRE_RATE`) sit at the top of the script.
-- HUD and game-over screen are drawn on the canvas in `draw()`; the neon look comes from the `glow()` helper (`shadowBlur`).
+- Waves: wave 0 counts as cleared, so an `INTERMISSION` countdown precedes every wave; wave `n` spawns `waveSize(n)` enemies and they speed up per wave.
+- All player damage goes through `damage()` (shield, HP, invulnerability, death); all enemy deaths go through `kill()`, which grants a random `POWERS` entry every `POWER_EVERY` kills. Nova kills pass `countsForPower = false` so powerups can't chain.
+- Impact feel comes from `shake` (world is translated, HUD is not), `flash`/`flashRGB` (red on hit), and `burst()` particles.
+- Tuning constants sit at the top of the script; the neon look comes from the `glow()` helper (`shadowBlur`).
 
 ## Assets
 
-`sfx/` holds `.wav` sound effects and music, not yet wired into any game. Because pages run from `file://`, load them with `new Audio('sfx/<name>.wav')` (relative path); `fetch`/Web Audio decoding of local files is blocked in Chrome. Browsers block audio until a user gesture, so start music on the first click/keypress. `background_music.wav` is ~8 MB.
+`sfx/` holds the `.wav` sounds used by `shooter.html` through the `sfx(name, vol)` helper (clones the element so repeats overlap) and the looping `music` element. Because pages run from `file://`, load audio with `new Audio('sfx/<name>.wav')`; `fetch`/Web Audio decoding of local files is blocked in Chrome. Browsers block audio until a user gesture. `background_music.wav` is ~8 MB.

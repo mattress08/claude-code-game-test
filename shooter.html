@@ -16,17 +16,45 @@ const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const fit = () => { cv.width = innerWidth; cv.height = innerHeight; };
 addEventListener('resize', fit); fit();
 
-const PR = 12, ER = 14, BR = 4, PSPEED = 220, ESPEED = 60, PBSPEED = 600, EBSPEED = 200, FIRE_RATE = 0.15;
+const PR = 12, ER = 14, BR = 4, ESPEED = 60, PBSPEED = 600, EBSPEED = 200, FIRE_RATE = 0.15;
+const PSPEED = 230, FRICTION = 5, ACCEL = PSPEED * FRICTION; // top speed = ACCEL / FRICTION
+const MAX_HP = 3, POWER_EVERY = 5, POWER_TIME = 8, INTERMISSION = 3;
+const POWERS = [
+  { id: 'triple', name: 'TRIPLE SHOT', color: '#39ff14' },
+  { id: 'rapid', name: 'RAPID FIRE', color: '#ff9100' },
+  { id: 'shield', name: 'SHIELD', color: '#e0ffff' },
+  { id: 'nova', name: 'NOVA BOMB', color: '#ffffff' },
+];
+
+// Audio: new Audio() works from file://, fetch/Web Audio does not
+const music = new Audio('sfx/background_music.wav');
+music.loop = true; music.volume = 0.35;
+const sounds = {};
+function sfx(name, vol = 1) {
+  const a = (sounds[name] ??= new Audio(`sfx/${name}.wav`)).cloneNode(); // clone so repeats can overlap
+  a.volume = vol;
+  a.play().catch(() => {});
+}
+
 const keys = {}, mouse = { x: 0, y: 0, down: false };
-addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === 'Escape' && state === 'play') { state = 'paused'; music.pause(); }
+  else if (e.key === 'Escape' && state === 'paused') { state = 'play'; music.play().catch(() => {}); }
+});
 addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
-cv.addEventListener('mousedown', () => { if (over) reset(); mouse.down = true; });
+cv.addEventListener('mousedown', () => {
+  if (state === 'title' || state === 'over') start();
+  else mouse.down = true;
+});
 addEventListener('mouseup', () => mouse.down = false);
 
-let player, walls, enemies, bullets, score, elapsed, spawnT, fireT, over;
+let state = 'title', player, walls, enemies, bullets, particles, rings, score, elapsed, kills;
+let wave, toSpawn, spawnT, interT, fireT, invT, power, banner, shake, flash, flashRGB, muzzleT;
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const waveSize = n => 4 + 2 * n;
 
 // circle vs rectangle: closest point on the rect is within r
 const hitsRect = (x, y, r, w) => Math.hypot(x - clamp(x, w.x, w.x + w.w), y - clamp(y, w.y, w.y + w.h)) < r;
@@ -42,18 +70,20 @@ function los(ax, ay, bx, by, ws = walls) {
 }
 console.assert(hitsRect(5, 5, 1, { x: 0, y: 0, w: 10, h: 10 }) && !hitsRect(20, 5, 1, { x: 0, y: 0, w: 10, h: 10 }), 'hitsRect self-check');
 console.assert(!los(0, 5, 20, 5, [{ x: 8, y: 0, w: 4, h: 10 }]) && los(0, 20, 20, 20, [{ x: 8, y: 0, w: 4, h: 10 }]), 'los self-check');
+console.assert(waveSize(1) === 6, 'waveSize self-check');
 
-// axis-separated so things slide along walls instead of sticking
+// axis-separated so things slide along walls instead of sticking; returns which axes were blocked
 function move(e, dx, dy, r) {
-  const nx = clamp(e.x + dx, r, cv.width - r);
-  if (!hitsWall(nx, e.y, r)) e.x = nx;
-  const ny = clamp(e.y + dy, r, cv.height - r);
-  if (!hitsWall(e.x, ny, r)) e.y = ny;
+  const nx = clamp(e.x + dx, r, cv.width - r), ny = clamp(e.y + dy, r, cv.height - r);
+  let bx = nx !== e.x + dx, by = ny !== e.y + dy; // clamped by the screen edge
+  if (hitsWall(nx, e.y, r)) bx = true; else e.x = nx;
+  if (hitsWall(e.x, ny, r)) by = true; else e.y = ny;
+  return [bx, by];
 }
 
 function reset() {
   const W = cv.width, H = cv.height;
-  player = { x: W / 2, y: H / 2 };
+  player = { x: W / 2, y: H / 2, vx: 0, vy: 0, hp: MAX_HP };
   walls = [];
   for (let tries = 0; walls.length < 8 && tries < 200; tries++) {
     let w = rand(80, 220), h = rand(20, 40);
@@ -61,8 +91,20 @@ function reset() {
     const wall = { x: rand(60, W - 60 - w), y: rand(60, H - 60 - h), w, h };
     if (!hitsRect(W / 2, H / 2, 120, wall)) walls.push(wall); // keep spawn clear
   }
-  enemies = []; bullets = [];
-  score = 0; elapsed = 0; spawnT = 1; fireT = 0; over = false;
+  enemies = []; bullets = []; particles = []; rings = [];
+  score = 0; elapsed = 0; kills = 0;
+  wave = 0; toSpawn = 0; spawnT = 0; interT = 0; // wave 0 is "cleared", so wave 1 starts after the intermission
+  fireT = 0; invT = 0; shake = 0; flash = 0; flashRGB = '255,0,0'; muzzleT = 0;
+  power = { triple: 0, rapid: 0, shield: false };
+  banner = { text: '', color: '#fff', t: 0 };
+}
+
+function start() {
+  reset();
+  state = 'play';
+  sfx('intro_sfx');
+  music.currentTime = 0;
+  music.play().catch(() => {});
 }
 
 function spawnEnemy() {
@@ -72,53 +114,143 @@ function spawnEnemy() {
   enemies.push({ x, y, cooldown: rand(1.5, 3) });
 }
 
-function shoot(from, tx, ty, speed, fromPlayer) {
-  const a = Math.atan2(ty - from.y, tx - from.x);
-  bullets.push({ x: from.x, y: from.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, fromPlayer });
+function shoot(from, angle, speed, fromPlayer, triple = false) {
+  bullets.push({ x: from.x, y: from.y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, fromPlayer, triple });
+}
+
+function burst(x, y, color, n, speed = 220) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2), s = rand(0.3, 1) * speed, life = rand(0.3, 0.7);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life, max: life, color });
+  }
+}
+
+function hitFx(rgb, amount) { flash = 1; flashRGB = rgb; shake = Math.max(shake, amount); }
+
+function kill(e, countsForPower) {
+  burst(e.x, e.y, '#ff00ff', 14);
+  score += 100;
+  shake = Math.max(shake, 4);
+  sfx('enemy_killed', 0.5);
+  if (countsForPower && ++kills % POWER_EVERY === 0) grantPower();
+}
+
+function grantPower() {
+  const p = POWERS[Math.floor(Math.random() * POWERS.length)];
+  sfx('powerup');
+  banner = { text: p.name, color: p.color, t: 2 };
+  if (p.id === 'triple') power.triple = POWER_TIME;
+  if (p.id === 'rapid') power.rapid = POWER_TIME;
+  if (p.id === 'shield') power.shield = true;
+  if (p.id === 'nova') { rings.push({ x: player.x, y: player.y, r: 0 }); hitFx('255,255,255', 25); }
+}
+
+function damage(fromX, fromY) {
+  if (invT > 0) return;
+  const d = Math.hypot(player.x - fromX, player.y - fromY) || 1;
+  player.vx += (player.x - fromX) / d * 500; // knockback, momentum carries it
+  player.vy += (player.y - fromY) / d * 500;
+  if (power.shield) {
+    power.shield = false; invT = 0.5;
+    burst(player.x, player.y, '#e0ffff', 24, 300);
+    hitFx('224,255,255', 10);
+    sfx('player_hit', 0.5);
+    return;
+  }
+  player.hp--; invT = 1;
+  hitFx('255,0,0', 16);
+  if (player.hp > 0) { sfx('player_hit'); return; }
+  state = 'over';
+  music.pause();
+  sfx('player_death');
+  burst(player.x, player.y, '#00ffff', 50, 350);
 }
 
 function update(dt) {
   elapsed += dt;
-  let dx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0), dy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
-  const len = Math.hypot(dx, dy) || 1;
-  move(player, dx / len * PSPEED * dt, dy / len * PSPEED * dt, PR);
+  invT -= dt; power.triple -= dt; power.rapid -= dt;
+
+  const ix = (keys.d ? 1 : 0) - (keys.a ? 1 : 0), iy = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+  const len = Math.hypot(ix, iy) || 1;
+  player.vx += ix / len * ACCEL * dt; player.vy += iy / len * ACCEL * dt;
+  const f = Math.exp(-FRICTION * dt); // frame-rate independent friction
+  player.vx *= f; player.vy *= f;
+  const [bx, by] = move(player, player.vx * dt, player.vy * dt, PR);
+  if (bx) player.vx = 0;
+  if (by) player.vy = 0;
 
   fireT -= dt;
-  if (mouse.down && fireT <= 0) { shoot(player, mouse.x, mouse.y, PBSPEED, true); fireT = FIRE_RATE; }
+  if (mouse.down && fireT <= 0) {
+    const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    for (const off of power.triple > 0 ? [-0.2, 0, 0.2] : [0]) shoot(player, a + off, PBSPEED, true, power.triple > 0);
+    fireT = power.rapid > 0 ? FIRE_RATE / 3 : FIRE_RATE;
+    muzzleT = 0.05;
+    sfx('player_shoot', 0.25);
+  }
 
-  spawnT -= dt;
-  if (spawnT <= 0) { spawnEnemy(); spawnT = Math.max(0.5, 2.5 - elapsed / 30); }
+  if (toSpawn > 0) {
+    spawnT -= dt;
+    if (spawnT <= 0) { spawnEnemy(); toSpawn--; spawnT = 0.7; }
+  } else if (!enemies.length) {
+    if (!interT) interT = INTERMISSION;
+    interT -= dt;
+    if (interT <= 0) { interT = 0; wave++; toSpawn = waveSize(wave); spawnT = 0; }
+  }
 
   // shortcut: enemies chase in a straight line and can get stuck on walls; add pathfinding if that feels bad
+  const espeed = ESPEED + 4 * wave;
   for (const e of enemies) {
     const d = Math.hypot(player.x - e.x, player.y - e.y) || 1;
-    move(e, (player.x - e.x) / d * ESPEED * dt, (player.y - e.y) / d * ESPEED * dt, ER);
-    if (d < PR + ER) over = true;
+    move(e, (player.x - e.x) / d * espeed * dt, (player.y - e.y) / d * espeed * dt, ER);
+    if (d < PR + ER) damage(e.x, e.y);
     e.cooldown -= dt;
     if (e.cooldown <= 0 && los(e.x, e.y, player.x, player.y)) {
-      shoot(e, player.x, player.y, EBSPEED, false);
+      shoot(e, Math.atan2(player.y - e.y, player.x - e.x), EBSPEED, false);
       e.cooldown = rand(1.5, 3);
     }
   }
 
   for (const b of bullets) {
     b.x += b.vx * dt; b.y += b.vy * dt;
-    if (b.x < 0 || b.y < 0 || b.x > cv.width || b.y > cv.height || hitsWall(b.x, b.y, BR)) { b.dead = true; continue; }
+    if (b.x < 0 || b.y < 0 || b.x > cv.width || b.y > cv.height) { b.dead = true; continue; }
+    if (hitsWall(b.x, b.y, BR)) { b.dead = true; burst(b.x, b.y, b.fromPlayer ? '#ffff00' : '#ff3030', 4, 120); continue; }
     if (b.fromPlayer) {
       const i = enemies.findIndex(e => Math.hypot(e.x - b.x, e.y - b.y) < ER + BR);
-      if (i >= 0) { enemies.splice(i, 1); b.dead = true; score += 100; }
-    } else if (Math.hypot(player.x - b.x, player.y - b.y) < PR + BR) over = true;
+      if (i >= 0) { kill(enemies.splice(i, 1)[0], true); b.dead = true; }
+    } else if (Math.hypot(player.x - b.x, player.y - b.y) < PR + BR) { b.dead = true; damage(b.x - b.vx, b.y - b.vy); }
   }
+
+  // nova shockwave kills enemies and erases enemy bullets as it passes
+  for (const r of rings) {
+    r.r += 900 * dt;
+    for (const e of enemies) if (Math.hypot(e.x - r.x, e.y - r.y) < r.r) { e.dead = true; kill(e, false); }
+    for (const b of bullets) if (!b.fromPlayer && Math.hypot(b.x - r.x, b.y - r.y) < r.r) b.dead = true;
+  }
+  enemies = enemies.filter(e => !e.dead);
+  rings = rings.filter(r => r.r < Math.hypot(cv.width, cv.height));
   bullets = bullets.filter(b => !b.dead);
 }
 
-const glow = c => { ctx.strokeStyle = ctx.fillStyle = ctx.shadowColor = c; ctx.shadowBlur = 15; };
-const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+// effects keep animating on the game-over screen
+function updateFx(dt) {
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+  shake *= Math.exp(-8 * dt);
+  flash = Math.max(0, flash - dt / 0.4);
+  muzzleT -= dt; banner.t -= dt;
+}
 
-function draw() {
+const glow = (c, blur = 15) => { ctx.strokeStyle = ctx.fillStyle = ctx.shadowColor = c; ctx.shadowBlur = blur; };
+const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+const circle = (x, y, r) => { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); };
+
+function draw(now) {
   const W = cv.width, H = cv.height;
   ctx.shadowBlur = 0;
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(rand(-shake, shake), rand(-shake, shake));
   ctx.strokeStyle = 'rgba(0,255,255,0.08)'; ctx.lineWidth = 1;
   ctx.beginPath();
   for (let x = 0; x < W; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
@@ -138,38 +270,105 @@ function draw() {
     ctx.closePath(); ctx.stroke();
   }
 
-  glow('#00ffff');
-  ctx.beginPath(); ctx.arc(player.x, player.y, PR, 0, Math.PI * 2); ctx.stroke();
-  const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
-  ctx.beginPath(); ctx.moveTo(player.x, player.y);
-  ctx.lineTo(player.x + Math.cos(a) * (PR + 10), player.y + Math.sin(a) * (PR + 10)); ctx.stroke();
+  if (state !== 'over' && !(invT > 0 && Math.floor(invT * 20) % 2)) { // blink while invulnerable
+    const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    const rapid = power.rapid > 0;
+    glow(rapid ? '#ff9100' : '#00ffff', rapid ? 15 + 10 * Math.sin(now / 50) : 15);
+    ctx.lineWidth = rapid ? 3 : 2;
+    circle(player.x, player.y, PR); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(player.x, player.y);
+    ctx.lineTo(player.x + Math.cos(a) * (PR + 10), player.y + Math.sin(a) * (PR + 10)); ctx.stroke();
+    if (muzzleT > 0) { glow('#ffffff', 25); circle(player.x + Math.cos(a) * (PR + 12), player.y + Math.sin(a) * (PR + 12), 6); ctx.fill(); }
+    if (power.shield) {
+      glow('#e0ffff', 25); ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.6 + 0.4 * Math.sin(now / 150);
+      circle(player.x, player.y, PR + 9); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
 
+  ctx.lineWidth = 2;
   for (const b of bullets) {
-    glow(b.fromPlayer ? '#ffff00' : '#ff3030');
-    ctx.beginPath(); ctx.arc(b.x, b.y, BR, 0, Math.PI * 2); ctx.fill();
+    if (b.triple) {
+      glow('#39ff14');
+      ctx.beginPath(); ctx.moveTo(b.x - b.vx * 0.03, b.y - b.vy * 0.03); ctx.lineTo(b.x, b.y); ctx.stroke();
+    } else glow(b.fromPlayer ? '#ffff00' : '#ff3030');
+    circle(b.x, b.y, BR); ctx.fill();
   }
 
-  glow('#00ffff');
-  ctx.font = '22px monospace'; ctx.textBaseline = 'top';
-  ctx.textAlign = 'left'; ctx.fillText(`SCORE ${score}`, 16, 12);
-  ctx.textAlign = 'right'; ctx.fillText(`TIME ${fmt(elapsed)}`, W - 16, 12);
-
-  if (over) {
-    ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H);
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    glow('#ff00ff'); ctx.font = '56px monospace'; ctx.fillText('GAME OVER', W / 2, H / 2 - 50);
-    glow('#00ffff'); ctx.font = '24px monospace';
-    ctx.fillText(`SCORE ${score}   TIME ${fmt(elapsed)}`, W / 2, H / 2 + 10);
-    ctx.fillText('click to restart', W / 2, H / 2 + 50);
+  for (const p of particles) {
+    glow(p.color, 10); ctx.globalAlpha = p.life / p.max;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
   }
+  ctx.globalAlpha = 1;
+
+  for (const r of rings) {
+    glow('#ffffff', 30); ctx.lineWidth = 6;
+    ctx.globalAlpha = Math.max(0, 1 - r.r / Math.hypot(W, H));
+    circle(r.x, r.y, r.r); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  if (flash > 0) {
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = `rgba(${flashRGB},${0.3 * flash})`; ctx.fillRect(0, 0, W, H);
+    const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.7);
+    g.addColorStop(0, `rgba(${flashRGB},0)`); g.addColorStop(1, `rgba(${flashRGB},${0.7 * flash})`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+
+  // HUD, centered and unaffected by shake
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  glow('#00ffff'); ctx.font = '22px monospace';
+  ctx.fillText(`WAVE ${Math.max(wave, 1)}    SCORE ${score}    TIME ${fmt(elapsed)}`, W / 2, 12);
+  glow('#ff3060'); ctx.font = '20px monospace';
+  ctx.fillText('◆'.repeat(Math.max(player.hp, 0)) + '◇'.repeat(MAX_HP - Math.max(player.hp, 0)), W / 2, 40);
+
+  const timers = [];
+  if (power.triple > 0) timers.push(['TRIPLE ' + Math.ceil(power.triple) + 's', '#39ff14']);
+  if (power.rapid > 0) timers.push(['RAPID ' + Math.ceil(power.rapid) + 's', '#ff9100']);
+  if (power.shield) timers.push(['SHIELD', '#e0ffff']);
+  ctx.font = '16px monospace';
+  const gap = 24, widths = timers.map(([t]) => ctx.measureText(t).width);
+  let x = W / 2 - (widths.reduce((a, b) => a + b, 0) + gap * (timers.length - 1)) / 2;
+  ctx.textAlign = 'left';
+  timers.forEach(([t, c], i) => { glow(c); ctx.fillText(t, x, 66); x += widths[i] + gap; });
+  ctx.textAlign = 'center';
+
+  if (banner.t > 0) {
+    glow(banner.color, 25); ctx.font = 'bold 30px monospace';
+    ctx.globalAlpha = Math.min(1, banner.t);
+    ctx.fillText(banner.text + '!', W / 2, 92 - (2 - banner.t) * 10);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.textBaseline = 'middle';
+  if (state === 'play' && interT > 0) {
+    glow('#00ffff', 30); ctx.font = 'bold 64px monospace';
+    ctx.fillText(`WAVE ${wave + 1}`, W / 2, H / 2 - 20);
+    ctx.font = '22px monospace'; ctx.fillText(`get ready  ${Math.ceil(interT)}`, W / 2, H / 2 + 30);
+  }
+
+  const overlay = (lines) => {
+    ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
+    lines.forEach(([text, color, size], i) => {
+      glow(color, 20); ctx.font = `${size}px monospace`;
+      ctx.fillText(text, W / 2, H / 2 - 60 + i * 50);
+    });
+  };
+  if (state === 'title') overlay([['NEON SHOOTER', '#00ffff', 56], ['WASD move · mouse aim + shoot · ESC pause', '#ff00ff', 20], ['click to start', '#ffffff', 24]]);
+  if (state === 'paused') overlay([['PAUSED', '#00ffff', 56], ['ESC to resume', '#ffffff', 24]]);
+  if (state === 'over') overlay([['GAME OVER', '#ff00ff', 56], [`WAVE ${Math.max(wave, 1)}   SCORE ${score}   TIME ${fmt(elapsed)}`, '#00ffff', 24], ['click to restart', '#ffffff', 24]]);
 }
 
 let last = performance.now();
 function loop(t) {
   const dt = Math.min((t - last) / 1000, 0.05); // cap so a background tab doesn't teleport everything
   last = t;
-  if (!over) update(dt);
-  draw();
+  if (state === 'play') update(dt);
+  if (state === 'play' || state === 'over') updateFx(dt);
+  draw(t);
   requestAnimationFrame(loop);
 }
 reset();
